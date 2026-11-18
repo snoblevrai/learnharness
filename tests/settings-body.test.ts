@@ -208,6 +208,13 @@ describe("parseGraphSettingsBody", () => {
 		assert.equal(parseGraphSettingsBody("nope").ok, false);
 	});
 
+	it("transcribeImagePages: boolean switch, absent = unset (factory on)", () => {
+		const off = parseGraphSettingsBody({ transcribeImagePages: false });
+		assert.ok(off.ok);
+		assert.deepEqual(off.settings, { transcribeImagePages: false });
+		assert.equal(parseGraphSettingsBody({ transcribeImagePages: "no" }).ok, false);
+	});
+
 	it("rendering (2026-10-06): boolean display switch — replace-whole like every sibling", () => {
 		const off = parseGraphSettingsBody({ enabled: true, rendering: false });
 		assert.ok(off.ok);

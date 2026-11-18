@@ -52,7 +52,24 @@ for (const [name, results] of [
 	["invalid error", [{ ...completed(), error: 42 }, completed(1)]],
 	["invalid notice", [{ ...completed(), notice: 42 }, completed(1)]],
 	["missing failure error", [{ ...completed(), ok: false, outcome: "failed" }, completed(1)]],
+	["confirm without page count", [{ ...completed(), ok: false, outcome: "confirm", stats: undefined }, completed(1)]],
+	["confirm with stats", [{ ...completed(), ok: false, outcome: "confirm", imagePages: 4 }, completed(1)]],
 ] as const) it(`malformed response (${name}) warns to inspect before retrying`, () => { assert.throws(() => parseNotesImportResults({ results }, files), /Check the graph before retrying/); });
+
+it("a confirm row (no error, no stats) is a valid response", () => {
+	const confirm: NotesImportResult = { requestIndex: 0, filePath: "same.md", ok: false, outcome: "confirm", imagePages: 4 };
+	assert.deepEqual(parseNotesImportResults({ results: [confirm, completed(1)] }, files), [confirm, completed(1)]);
+});
+
+it("POST sends the learner's transcription answer only when given", async () => {
+	const bodies: FormData[] = [];
+	globalThis.fetch = async (_url, init) => { bodies.push(init!.body as FormData); return Response.json({ results: [completed()] }); };
+	const file = new File(["x"], "same.md");
+	await postNotesImport([file]);
+	await postNotesImport([file], { imagePages: "skip" });
+	assert.equal(bodies[0]!.get("imagePages"), null);
+	assert.equal(bodies[1]!.get("imagePages"), "skip");
+});
 
 it("POST includes captured files and relative identities, preserving provider details", async () => {
 	const file = new File(["two"], "same.md"); Object.defineProperty(file, "webkitRelativePath", { value: "Course/Week/same.md" });
@@ -74,7 +91,7 @@ for (const outcome of ["completed", "failed", "partial", "aborted", "busy"] as c
 	globalThis.fetch = async () => Response.json({ results: [result] });
 	await mount(); await submit([file]);
 	assert.equal(current.importing, false); assert.equal(starts, 1); assert.equal(finishes, 1);
-	assert.deepEqual(Object.keys(current).sort(), ["errors", "importing", "notices", "onImportFiles"]);
+	assert.deepEqual(Object.keys(current).sort(), ["confirmation", "errors", "importing", "notices", "onConfirm", "onImportFiles"]);
 	const html = host!.innerHTML;
 	assert.doesNotMatch(html, /<button|<section|<ul|border|bg-card|rounded|shadow|Retry|Dismiss|Import complete/);
 	if (outcome === "completed") { assert.equal(html, ""); assert.deepEqual(current.errors, []); }

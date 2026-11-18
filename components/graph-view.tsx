@@ -64,7 +64,7 @@
  */
 
 import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { NotesImportControl, NotesImportErrors, NotesImportNotices, useNotesImport } from "@/components/notes-import.tsx";
+import { NotesImportControl, NotesImportErrors, NotesImportNotices, TranscribePagesDialog, useNotesImport } from "@/components/notes-import.tsx";
 import { PluginGraphActions } from "@/components/plugin-chrome";
 import { SettingsSlider as SettingSlider } from "@/components/settings/controls";
 import Link from "next/link";
@@ -1597,6 +1597,7 @@ export function GraphView({
 
 			<NotesImportErrors errors={notesImport.errors} />
 			<NotesImportNotices notices={notesImport.notices} />
+			<TranscribePagesDialog confirmation={notesImport.confirmation} onConfirm={notesImport.onConfirm} />
 			{/* Top-right tail (owner, 2026-09-20): the pipeline cost number —
 			    just a number, hover-highlighted, dropdown breakdown — then
 			    the running-pipeline pills under it. Lives BELOW the actions

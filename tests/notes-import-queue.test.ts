@@ -92,7 +92,7 @@ it("the queue uploads every accepted extension, including the expanded text type
 	queue.append(names.map((name) => file(name)));
 	await tick();
 	assert.deepEqual(sent, names);
-	assert.deepEqual(queue.getSnapshot(), { importing: false, errors: [], notices: [], completion: 1 });
+	assert.deepEqual(queue.getSnapshot(), { importing: false, errors: [], notices: [], confirmations: [], completion: 1 });
 });
 
 it("the file type check comes before the size check", () => {
@@ -187,14 +187,14 @@ it("an all-skipped selection publishes completion without validation errors or u
 	Object.defineProperty(oversized, "size", { value: Number.MAX_SAFE_INTEGER });
 	queue.append([file("config", "Vault/.git/config"), file(".draft.md", "Vault/.draft.md"), oversized]);
 	assert.equal(publications, 1);
-	assert.deepEqual(queue.getSnapshot(), { importing: false, errors: [], notices: [], completion: 1 });
+	assert.deepEqual(queue.getSnapshot(), { importing: false, errors: [], notices: [], confirmations: [], completion: 1 });
 	await tick();
 	assert.deepEqual(paths, []);
 	assert.equal(publications, 1, "no asynchronous settlement for skipped files");
 	queue.append([file("notes.md")]);
 	await tick();
 	assert.deepEqual(paths, ["notes.md"]);
-	assert.deepEqual(queue.getSnapshot(), { importing: false, errors: [], notices: [], completion: 2 });
+	assert.deepEqual(queue.getSnapshot(), { importing: false, errors: [], notices: [], confirmations: [], completion: 2 });
 	unsubscribe();
 });
 
@@ -205,11 +205,11 @@ it("an all-skipped append does not complete or disturb an active import", async 
 	queue.append([file("notes.md")]);
 	queue.append([file("config", "Vault/.git/config"), file(".draft.md", "Vault/.draft.md")]);
 	assert.equal(calls, 1);
-	assert.deepEqual(queue.getSnapshot(), { importing: true, errors: [], notices: [], completion: 0 });
+	assert.deepEqual(queue.getSnapshot(), { importing: true, errors: [], notices: [], confirmations: [], completion: 0 });
 	resolve([success("notes.md")]);
 	await tick();
 	assert.equal(calls, 1);
-	assert.deepEqual(queue.getSnapshot(), { importing: false, errors: [], notices: [], completion: 1 });
+	assert.deepEqual(queue.getSnapshot(), { importing: false, errors: [], notices: [], confirmations: [], completion: 1 });
 });
 
 it("synchronous transport failures settle one wave once without reentrant pump recursion", async () => {
@@ -219,4 +219,36 @@ it("synchronous transport failures settle one wave once without reentrant pump r
 	await tick();
 	assert.equal(calls, 4); assert.equal(queue.getSnapshot().completion, 1); assert.equal(queue.getSnapshot().importing, false);
 	assert.equal(queue.getSnapshot().errors.length, 4);
+});
+
+it("a PDF sent back for confirmation waits, keeps the queue importing, then goes again with the answer", async () => {
+	const sent: { name: string; imagePages?: string }[] = [];
+	const queue = createNotesImportQueue(async ([f], options) => {
+		sent.push({ name: f!.name, ...(options?.imagePages ? { imagePages: options.imagePages } : {}) });
+		if (f!.name === "scan.pdf" && !options?.imagePages) return [{ requestIndex: 0, filePath: "scan.pdf", ok: false, outcome: "confirm", imagePages: 5 }];
+		return [success(f!.name)];
+	});
+	queue.append([file("scan.pdf"), file("notes.md")]);
+	await tick();
+	assert.deepEqual(queue.getSnapshot().confirmations, [{ index: 0, filePath: "scan.pdf", imagePages: 5 }]);
+	assert.equal(queue.getSnapshot().importing, true, "an unanswered question is still work");
+	assert.equal(queue.getSnapshot().completion, 0);
+	assert.deepEqual(queue.getSnapshot().errors, []);
+	queue.confirm(0, "skip");
+	queue.confirm(0, "transcribe"); // a second answer for the same file is ignored
+	await tick();
+	assert.deepEqual(sent, [{ name: "scan.pdf" }, { name: "notes.md" }, { name: "scan.pdf", imagePages: "skip" }]);
+	assert.deepEqual(queue.getSnapshot().confirmations, []);
+	assert.equal(queue.getSnapshot().importing, false);
+	assert.equal(queue.getSnapshot().completion, 1);
+});
+
+it("a second confirm request after an answer is a malformed response, not another question", async () => {
+	const queue = createNotesImportQueue(async ([f]) => [{ requestIndex: 0, filePath: f!.name, ok: false, outcome: "confirm", imagePages: 4 }]);
+	queue.append([file("scan.pdf")]);
+	await tick();
+	queue.confirm(0, "transcribe");
+	await tick();
+	assert.deepEqual(queue.getSnapshot().confirmations, []);
+	assert.deepEqual(queue.getSnapshot().errors, ["scan.pdf: Invalid import response. Check the graph before retrying."]);
 });

@@ -1,4 +1,4 @@
-import { IMPORT_EXTENSIONS, MAX_IMPORT_BYTES, validNotesPath } from "@/lib/notes-import-limits";
+import { IMPORT_EXTENSIONS, MAX_IMPORT_BYTES, validNotesPath, type ImagePagesDecision } from "@/lib/notes-import-limits";
 import type { NotesImportResult } from "./notes-import";
 
 export const notesPath = (file: File): string => file.webkitRelativePath || file.name;
@@ -15,40 +15,51 @@ const unsupportedSummary = (extensions: readonly string[]): string =>
 	`Skipped ${extensions.length} ${extensions.length === 1 ? "file that isn't" : "files that aren't"} text, Markdown, or PDF (${[...new Set(extensions)].join(", ")}).`;
 const unsafeSummary = (count: number): string =>
 	`Skipped ${count} ${count === 1 ? "file with a name" : "files with names"} the import can't use (e.g. a ':' in the name).`;
+/** A PDF waiting for the learner to allow (or not) transcribing its image-only pages. */
+export interface ImportConfirmation { index: number; filePath: string; imagePages: number }
 export interface ImportQueueSnapshot {
 	importing: boolean;
 	errors: string[];
 	notices: string[];
+	/** In selection order; the UI asks about the first one. */
+	confirmations: ImportConfirmation[];
 	completion: number;
 }
-export const EMPTY_IMPORT_QUEUE: ImportQueueSnapshot = { importing: false, errors: [], notices: [], completion: 0 };
+export const EMPTY_IMPORT_QUEUE: ImportQueueSnapshot = { importing: false, errors: [], notices: [], confirmations: [], completion: 0 };
+export type NotesImportPost = (files: readonly File[], options?: { imagePages?: ImagePagesDecision }) => Promise<NotesImportResult[]>;
 
 /** PR198's refill-on-completion, one-request-per-file transport, extended to
  * accept later selections. One instance per page, NOT three workers per click.
  * Only pending/in-flight Files are retained; no retry or persisted upload queue. */
-export function createNotesImportQueue(post: (files: readonly File[]) => Promise<NotesImportResult[]>) {
+export function createNotesImportQueue(post: NotesImportPost) {
 	const listeners = new Set<() => void>();
-	const pending: { file: File; index: number }[] = [];
+	const pending: { file: File; index: number; imagePages?: ImagePagesDecision }[] = [];
+	/** Files the server sent back for confirmation; they count as work until answered. */
+	const awaiting = new Map<number, { file: File; confirmation: ImportConfirmation }>();
 	const failures = new Map<number, string>();
 	const notices = new Map<number, string>();
 	let active = 0, sequence = 0;
 	let snapshot = EMPTY_IMPORT_QUEUE;
 	const ordered = (map: Map<number, string>) => [...map].sort(([a], [b]) => a - b).map(([, text]) => text);
 	const publish = (completed = false) => {
-		snapshot = { importing: active > 0 || pending.length > 0, errors: ordered(failures), notices: ordered(notices), completion: snapshot.completion + Number(completed) };
+		const confirmations = [...awaiting].sort(([a], [b]) => a - b).map(([, entry]) => entry.confirmation);
+		snapshot = { importing: active > 0 || pending.length > 0 || awaiting.size > 0, errors: ordered(failures), notices: ordered(notices), confirmations, completion: snapshot.completion + Number(completed) };
 		for (const listener of [...listeners]) listener();
 	};
 	// Normalize a synchronously throwing transport to the same async settlement.
-	const send = async (file: File) => post([file]);
+	const send = async (file: File, imagePages?: ImagePagesDecision) => post([file], imagePages ? { imagePages } : undefined);
+	const idle = () => active === 0 && pending.length === 0 && awaiting.size === 0;
 	function pump(): void {
 		while (active < 3 && pending.length > 0) {
-			const { file, index } = pending.shift()!;
+			const { file, index, imagePages } = pending.shift()!;
 			active++;
 			void (async () => {
 				try {
-					const [r] = await send(file);
+					const [r] = await send(file, imagePages);
 					if (!r) throw new Error("Invalid import response. Check the graph before retrying.");
-					if (!r.ok) {
+					if (r.outcome === "confirm" && !imagePages) awaiting.set(index, { file, confirmation: { index, filePath: r.filePath, imagePages: r.imagePages ?? 0 } });
+					else if (r.outcome === "confirm") throw new Error("Invalid import response. Check the graph before retrying.");
+					else if (!r.ok) {
 						const details = [r.provider, r.missing?.join(", "), r.slots?.join(", ")].filter(Boolean);
 						failures.set(index, `${r.filePath}: ${r.error}${r.code ? `\n${[r.code, ...details].join(" — ")}` : ""}`);
 					} else if (r.notice) notices.set(index, `${r.filePath}: ${r.notice}`);
@@ -58,7 +69,7 @@ export function createNotesImportQueue(post: (files: readonly File[]) => Promise
 				} finally {
 					active--;
 					pump();
-					publish(active === 0 && pending.length === 0);
+					publish(idle());
 				}
 			})();
 		}
@@ -66,6 +77,15 @@ export function createNotesImportQueue(post: (files: readonly File[]) => Promise
 	return {
 		getSnapshot: () => snapshot,
 		subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+		/** The learner's answer for one awaiting PDF: the file goes back to the server with it. */
+		confirm(index: number, imagePages: ImagePagesDecision) {
+			const entry = awaiting.get(index);
+			if (!entry) return;
+			awaiting.delete(index);
+			pending.push({ file: entry.file, index, imagePages });
+			pump();
+			publish();
+		},
 		append(files: readonly File[]) {
 			if (files.length === 0) return;
 			if (!snapshot.importing) { failures.clear(); notices.clear(); sequence = 0; }
@@ -82,7 +102,7 @@ export function createNotesImportQueue(post: (files: readonly File[]) => Promise
 			}
 			if (unsafe.length > 0) failures.set(unsafe[0]!, unsafeSummary(unsafe.length));
 			if (unsupported.length > 0) failures.set(unsupported[0]!.index, unsupportedSummary(unsupported.map(({ extension }) => extension)));
-			const hadWork = active > 0 || pending.length > 0;
+			const hadWork = !idle();
 			pump();
 			publish(!hadWork);
 		},

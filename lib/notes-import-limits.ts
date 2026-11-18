@@ -8,6 +8,14 @@ export const IMPORT_EXTENSIONS = new RegExp(`\\.(?:${IMPORT_EXTENSION_NAMES.join
 export const IMPORT_ACCEPT = IMPORT_EXTENSION_NAMES.map((name) => `.${name}`).join(",");
 export const UNSUPPORTED_TYPE_MESSAGE = "This file type isn't supported. Use text, Markdown, or PDF.";
 
+/** Image-only PDF pages (handwritten or scanned) are transcribed by the Vision
+ * model. Above this many in one PDF, the learner confirms first. */
+export const TRANSCRIBE_CONFIRM_ABOVE = 3;
+/** Rough Vision-model cost of one page (image in, Markdown out), for the confirmation copy. */
+export const TRANSCRIBE_TOKENS_PER_PAGE = 2500;
+/** The import request's per-file answer to that confirmation (form field "imagePages"). */
+export type ImagePagesDecision = "transcribe" | "skip";
+
 /** Contributor's relative-path contract: identity only, never a disk path.
  * Chromium may serialize the basename or the full webkitRelativePath. */
 export function validNotesPath(path: string, filename: string): boolean {

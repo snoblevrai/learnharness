@@ -9,7 +9,8 @@
  *
  * Only filename extensions listed in lib/notes-import-limits.ts are taken.
  * Among those files, a PDF (spotted by its %PDF- header) is converted to
- * Markdown first. Other files are decoded as UTF-8 unless a zero byte in
+ * Markdown first; its image-only pages are transcribed by the Vision model
+ * (Settings → Graph switch, confirmation above TRANSCRIBE_CONFIRM_ABOVE). Other files are decoded as UTF-8 unless a zero byte in
  * their first 8 KiB causes refusal. This is a binary-file heuristic, not
  * complete text or encoding validation. These refusals, and PDFs with
  * nothing to extract, occur before any source record or model call.
@@ -20,8 +21,8 @@
  * healthy. The dock's chips + graph refetch track progress live through
  * /api/graph/status, as with session runs.
  */
-import { convertPdf, extraction, joinPages, NotesImportError, sourceDirectory } from "@/src/server";
-import { IMPORT_EXTENSIONS, MAX_IMPORT_BODY_BYTES, MAX_IMPORT_BYTES, UNSUPPORTED_TYPE_MESSAGE, validNotesPath } from "@/lib/notes-import-limits.ts";
+import { convertPdf, extraction, handwriting, joinPages, NotesImportError, sourceDirectory } from "@/src/server";
+import { IMPORT_EXTENSIONS, MAX_IMPORT_BODY_BYTES, MAX_IMPORT_BYTES, TRANSCRIBE_CONFIRM_ABOVE, UNSUPPORTED_TYPE_MESSAGE, validNotesPath, type ImagePagesDecision } from "@/lib/notes-import-limits.ts";
 import { FormBodyLimitError, readBoundedFormData } from "@/lib/bounded-form-data.ts";
 import {
 	emit,
@@ -35,7 +36,9 @@ export const dynamic = "force-dynamic";
 
 interface ImportResult {
 	requestIndex: number;
-	outcome: "completed" | "failed" | "partial" | "aborted" | "busy";
+	/** "confirm": nothing was imported; ask the learner, then send the file
+	 *  again with an imagePages decision. */
+	outcome: "completed" | "failed" | "partial" | "aborted" | "busy" | "confirm";
 	filePath: string;
 	ok: boolean;
 	stats?: EmissionStats;
@@ -50,6 +53,8 @@ interface ImportResult {
 	slots?: string[];
 	/** Shown beside a completed import (every PDF: scanner text may be wrong). */
 	notice?: string;
+	/** "confirm" only: how many image-only pages the PDF has. */
+	imagePages?: number;
 }
 
 const MAX_PDF_PAGES = 1000;
@@ -57,14 +62,25 @@ const PDF_MAGIC = [0x25, 0x50, 0x44, 0x46, 0x2d]; // "%PDF-"
 
 type NotesFile = { kind: "notes"; text: string; notice?: string } | { kind: "refused"; error: string };
 
-/** A PDF becomes page-marked Markdown; any other accepted file is read as text. */
-async function readNotesFile(file: File): Promise<NotesFile> {
+const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
+const pagesWord = (count: number) => count === 1 ? "page" : "pages";
+
+type NotesFileOrConfirm = NotesFile | { kind: "confirm"; imagePages: number };
+
+/** A PDF becomes page-marked Markdown; any other accepted file is read as text.
+ *  Image-only pages (handwritten or scanned) are transcribed by the Vision
+ *  model when Settings → Graph allows it. Above TRANSCRIBE_CONFIRM_ABOVE such
+ *  pages, a request without a decision gets "confirm" back instead: the client
+ *  asks the learner, then sends the file again with the answer. */
+async function readNotesFile(file: File, decision: ImagePagesDecision | undefined, signal?: AbortSignal): Promise<NotesFileOrConfirm> {
 	if (!IMPORT_EXTENSIONS.test(file.name)) return { kind: "refused", error: UNSUPPORTED_TYPE_MESSAGE };
 	const bytes = new Uint8Array(await file.arrayBuffer());
 	if (!PDF_MAGIC.every((byte, i) => bytes[i] === byte)) {
 		if (bytes.subarray(0, 8192).includes(0)) return { kind: "refused", error: "This file isn't plain text." };
 		return { kind: "notes", text: new TextDecoder().decode(bytes) };
 	}
+	// pdfjs may take ownership of the buffer it parses; keep a copy for rendering.
+	const original = bytes.slice();
 	const pdf = await convertPdf(bytes, MAX_PDF_PAGES);
 	switch (pdf.kind) {
 		case "unreadable":
@@ -72,11 +88,39 @@ async function readNotesFile(file: File): Promise<NotesFile> {
 		case "too-long":
 			return { kind: "refused", error: "Too long. Max 1,000 pages." };
 		case "converted": {
-			const text = joinPages(pdf.pages);
-			if (!text) return { kind: "refused", error: "OCR not supported yet." };
-			const skipped = pdf.pages.filter((page) => page.kind === "image-only").length;
-			const omission = skipped > 0 ? ` Skipped ${skipped} image-only ${skipped === 1 ? "page" : "pages"}; OCR is not supported.` : "";
-			return { kind: "notes", text, notice: `Scanned pages may have errors.${omission}` };
+			const imagePages = pdf.pages.filter((page) => page.kind === "image-only").map((page) => page.number);
+			const state = imagePages.length > 0 ? handwriting.state() : "off";
+			if (state === "on" && decision === undefined && imagePages.length > TRANSCRIBE_CONFIRM_ABOVE) {
+				return { kind: "confirm", imagePages: imagePages.length };
+			}
+			const transcription = state === "on" && decision !== "skip" ? await handwriting.transcribe(original, imagePages, signal) : null;
+			const pages = transcription
+				? pdf.pages.map((page) => {
+					const transcribed = page.kind === "image-only" ? transcription.texts.get(page.number) : undefined;
+					return transcribed === undefined ? page : {
+						kind: "text" as const,
+						number: page.number,
+						markdown: `> *Automatic transcription of a handwritten or scanned page. It may contain errors.*\n\n${transcribed}`,
+					};
+				})
+				: pdf.pages;
+			const text = joinPages(pages);
+			const skipped = pages.filter((page) => page.kind === "image-only").length;
+			// Why the remaining image-only pages were left out.
+			const reason = transcription ? "could not be transcribed"
+				: state === "on" ? "not transcribed"
+				: state === "off" ? "transcription is off in Settings → Graph"
+				: "OCR is not supported";
+			if (!text) {
+				if (transcription) return { kind: "refused", error: "Could not transcribe any page." };
+				if (state === "on") return { kind: "refused", error: "This PDF has no text pages, and its image pages were not transcribed." };
+				return { kind: "refused", error: state === "off" ? "This PDF has no text pages. Image-page transcription is off in Settings → Graph." : "OCR not supported yet." };
+			}
+			const parts = [
+				transcription && transcription.texts.size > 0 ? `Transcribed ${plural(transcription.texts.size, "handwritten or scanned page", "handwritten or scanned pages")}; check them in the graph.` : "",
+				skipped > 0 ? (transcription ? `${plural(skipped, "image-only page", "image-only pages")} ${reason}.` : `Skipped ${skipped} image-only ${pagesWord(skipped)}; ${reason}.`) : "",
+			].filter(Boolean);
+			return { kind: "notes", text, notice: ["Scanned pages may have errors.", ...parts].join(" ") };
 		}
 	}
 }
@@ -109,6 +153,12 @@ export async function POST(request: Request) {
 	if (files.some((file, i) => !validNotesPath(paths[i]!, file.name))) {
 		return Response.json({ results: [], error: "Import contains an unsafe or mismatched relative path" }, { status: 400 });
 	}
+	// The learner's answer to the transcription confirmation, for every file in this request.
+	const rawDecision = form.get("imagePages");
+	if (rawDecision !== null && rawDecision !== "transcribe" && rawDecision !== "skip") {
+		return Response.json({ results: [], error: "Invalid imagePages decision" }, { status: 400 });
+	}
+	const decision = rawDecision ?? undefined;
 	const results: ImportResult[] = [];
 	const queue = files.map((file, requestIndex) => ({ file, requestIndex, filePath: paths[requestIndex]! }));
 	const workers = Array.from({ length: Math.min(3, files.length) }, async () => {
@@ -117,7 +167,11 @@ export async function POST(request: Request) {
 			if (!next) return;
 			const { file, requestIndex, filePath } = next;
 			try {
-				const notes = await readNotesFile(file);
+				const notes = await readNotesFile(file, decision, request.signal);
+				if (notes.kind === "confirm") {
+					results.push({ filePath, requestIndex, outcome: "confirm", ok: false, imagePages: notes.imagePages });
+					continue;
+				}
 				if (notes.kind === "refused") {
 					results.push({ filePath, requestIndex, outcome: "failed", ok: false, error: notes.error });
 					continue;

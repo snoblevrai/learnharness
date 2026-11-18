@@ -465,6 +465,11 @@ export interface GraphSettings {
 	 *  delays extraction — the user's stated cost/thoroughness tradeoff,
 	 *  not a misconfiguration to police. */
 	extractionChunkTokens?: number;
+	/** Notes import: transcribe image-only PDF pages (handwritten or
+	 *  scanned) with the Vision-slot model instead of skipping them.
+	 *  Default on. Above TRANSCRIBE_CONFIRM_ABOVE pages per PDF, the
+	 *  learner confirms first (lib/notes-import-limits.ts). */
+	transcribeImagePages?: boolean;
 }
 
 /**
@@ -550,7 +555,7 @@ export const FACTORY_SETTINGS: FactorySettings = {
 		sessionNameSerif: true,
 		mdRendering: { headingWeight: 900, boldColor: null, italicColor: null },
 	},
-	graph: { enabled: true, rendering: true, extractionChunkTokens: 4096 },
+	graph: { enabled: true, rendering: true, extractionChunkTokens: 4096, transcribeImagePages: true },
 	compaction: { thresholdTokens: 150_000, includeReasoning: false },
 };
 
@@ -826,6 +831,8 @@ function sanitizeGraph(raw: Record<string, unknown>): GraphSettings {
 	if (enabled !== undefined) out.enabled = enabled;
 	const rendering = boolOrDrop(raw.rendering);
 	if (rendering !== undefined) out.rendering = rendering;
+	const transcribeImagePages = boolOrDrop(raw.transcribeImagePages);
+	if (transcribeImagePages !== undefined) out.transcribeImagePages = transcribeImagePages;
 	const rawTokens = raw.extractionChunkTokens;
 	if (typeof rawTokens === "number" && Number.isFinite(rawTokens) && rawTokens > 0) {
 		out.extractionChunkTokens = Math.max(EXTRACTION_CHUNK_TOKENS_FLOOR, Math.floor(rawTokens));

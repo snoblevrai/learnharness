@@ -350,6 +350,10 @@ export function parseGraphSettingsBody(body: unknown): SettingsBodyResult<GraphS
 		if (typeof raw.rendering !== "boolean") return { ok: false, error: "rendering must be a boolean" };
 		settings.rendering = raw.rendering;
 	}
+	if (raw.transcribeImagePages !== undefined) {
+		if (typeof raw.transcribeImagePages !== "boolean") return { ok: false, error: "transcribeImagePages must be a boolean" };
+		settings.transcribeImagePages = raw.transcribeImagePages;
+	}
 	if (raw.extractionChunkTokens !== undefined) {
 		if (typeof raw.extractionChunkTokens !== "number" || !Number.isFinite(raw.extractionChunkTokens)) {
 			return { ok: false, error: "extractionChunkTokens must be a number" };

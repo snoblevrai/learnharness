@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useId, useRef, useState, useSyncExternalStore, type ChangeEvent } from "react";
+import { useEffect, useId, useRef, useState, useSyncExternalStore, type ChangeEvent, type ReactElement, type ReactNode } from "react";
 import { WaypointsIcon } from "lucide-react";
 import { Hint } from "@/components/ui/hint";
-import { IMPORT_ACCEPT } from "@/lib/notes-import-limits.ts";
+import { IMPORT_ACCEPT, TRANSCRIBE_TOKENS_PER_PAGE, type ImagePagesDecision } from "@/lib/notes-import-limits.ts";
 import { useInteractionLayer, useInteractionLayers } from "@/components/interaction-layers";
-import { INTERACTION_LAYER_Z_BASE } from "@/components/host-dialog";
-import { createNotesImportQueue, EMPTY_IMPORT_QUEUE, notesPath } from "./notes-import-queue";
+import { HostDialog, INTERACTION_LAYER_Z_BASE } from "@/components/host-dialog";
+import { createNotesImportQueue, EMPTY_IMPORT_QUEUE, notesPath, type ImportConfirmation } from "./notes-import-queue";
 
 export { MAX_IMPORT_BYTES } from "@/lib/notes-import-limits.ts";
 export { notesPath } from "./notes-import-queue";
@@ -16,7 +16,7 @@ export interface NotesImportResult {
 	requestIndex: number;
 	filePath: string;
 	ok: boolean;
-	outcome: "completed" | "failed" | "partial" | "aborted" | "busy";
+	outcome: "completed" | "failed" | "partial" | "aborted" | "busy" | "confirm";
 	stats?: { nodes: number; chains?: number; droppedChains?: number };
 	error?: string;
 	code?: string;
@@ -24,6 +24,8 @@ export interface NotesImportResult {
 	provider?: string;
 	slots?: string[];
 	notice?: string;
+	/** "confirm" only: the PDF's image-only page count. */
+	imagePages?: number;
 }
 
 /** Contributor's strict attribution: validate the complete response before
@@ -37,7 +39,11 @@ export function parseNotesImportResults(body: unknown, files: readonly File[]): 
 		const r = raw as NotesImportResult;
 		if (!Number.isInteger(r.requestIndex) || r.requestIndex < 0 || r.requestIndex >= files.length || seen.has(r.requestIndex) || r.filePath !== notesPath(files[r.requestIndex]!)) throw invalid();
 		seen.add(r.requestIndex);
-		if (!["completed", "failed", "partial", "aborted", "busy"].includes(r.outcome) || typeof r.ok !== "boolean" || r.ok !== (r.outcome === "completed")) throw invalid();
+		if (!["completed", "failed", "partial", "aborted", "busy", "confirm"].includes(r.outcome) || typeof r.ok !== "boolean" || r.ok !== (r.outcome === "completed")) throw invalid();
+		if (r.outcome === "confirm") {
+			if (!Number.isInteger(r.imagePages) || r.imagePages! <= 0 || r.stats !== undefined) throw invalid();
+			continue;
+		}
 		if (r.stats !== undefined && (!r.stats || typeof r.stats !== "object" || !Number.isFinite(r.stats.nodes) || r.stats.nodes < 0 || (r.stats.chains !== undefined && (!Number.isFinite(r.stats.chains) || r.stats.chains < 0)))) throw invalid();
 		if (r.ok && !r.stats) throw invalid();
 		if (!r.ok && typeof r.error !== "string") throw invalid();
@@ -47,12 +53,13 @@ export function parseNotesImportResults(body: unknown, files: readonly File[]): 
 	return body.results as NotesImportResult[];
 }
 
-export async function postNotesImport(files: readonly File[]): Promise<NotesImportResult[]> {
+export async function postNotesImport(files: readonly File[], options: { imagePages?: ImagePagesDecision } = {}): Promise<NotesImportResult[]> {
 	const form = new FormData();
 	for (const file of files) {
 		form.append("files", file);
 		form.append("paths", notesPath(file));
 	}
+	if (options.imagePages) form.append("imagePages", options.imagePages);
 	const response = await fetch("/api/graph/import", { method: "POST", body: form });
 	let body: unknown;
 	try { body = await response.json(); }
@@ -80,6 +87,8 @@ export function useNotesImport(callbacks: { onStart?: () => void; onFinish?: () 
 	}, [snapshot.completion]);
 	return {
 		errors: snapshot.errors, notices: snapshot.notices, importing: snapshot.importing,
+		confirmation: snapshot.confirmations[0] ?? null,
+		onConfirm: (index: number, imagePages: ImagePagesDecision) => pageImportQueue.confirm(index, imagePages),
 		onImportFiles: (files: FileList | null) => {
 			if (!files || files.length === 0) return;
 			latest.current.onStart?.();
@@ -132,4 +141,49 @@ export function NotesImportErrors({ errors }: { errors: readonly string[] }) {
 }
 export function NotesImportNotices({ notices }: { notices: readonly string[] }) {
 	return <>{notices.map((notice, i) => <p key={i} role="status" className="max-w-full whitespace-pre-wrap break-words text-xs text-muted-foreground">{notice}</p>)}</>;
+}
+
+/** The transcription question for one PDF with many image-only pages. Text
+ * pages are imported either way; "No" just leaves the image pages out. The
+ * delete-node / abort dialogs' minimal tone: title, one line, two actions. */
+export function TranscribePagesBody({ confirmation, onAnswer, renderFrame }: {
+	confirmation: ImportConfirmation;
+	onAnswer: (imagePages: ImagePagesDecision) => void;
+	renderFrame?: (frame: ReactElement<{ children: ReactNode }>) => ReactNode;
+}) {
+	const { filePath, imagePages } = confirmation;
+	const tokens = Math.round(imagePages * TRANSCRIBE_TOKENS_PER_PAGE / 1000);
+	const frame = <div data-testid="transcribe-pages-dialog-frame" onClick={(e) => e.stopPropagation()}
+		className="mx-4 w-full max-w-sm rounded-xl border bg-card p-5 shadow-lg">
+		<h2 className="text-sm font-semibold text-card-foreground" data-testid="transcribe-pages-title">
+			Transcribe {imagePages} image {imagePages === 1 ? "page" : "pages"}?
+		</h2>
+		<p className="mt-1.5 break-words font-mono text-xs" data-testid="transcribe-pages-file">{filePath}</p>
+		<p className="mt-1.5 text-xs text-muted-foreground" data-testid="transcribe-pages-line">
+			{imagePages === 1 ? "This page has" : "These pages have"} no text layer (handwritten or scanned). The Vision model can transcribe them, using about {tokens}k tokens. Text pages are imported either way.
+		</p>
+		<div className="mt-4 flex justify-end gap-2">
+			<button type="button" data-testid="transcribe-pages-no" onClick={() => onAnswer("skip")}
+				className="rounded-sm px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground">No</button>
+			<button type="button" data-testid="transcribe-pages-yes" onClick={() => onAnswer("transcribe")}
+				className="rounded-sm border border-border bg-background px-3 py-1.5 font-ui text-xs text-foreground transition-colors hover:border-muted-foreground/50">Yes</button>
+		</div>
+	</div>;
+	return renderFrame ? renderFrame(frame) : frame;
+}
+
+/** Shown while an import waits for an answer; dismissing it (Esc, backdrop) means No. */
+export function TranscribePagesDialog({ confirmation, onConfirm }: {
+	confirmation: ImportConfirmation | null;
+	onConfirm: (index: number, imagePages: ImagePagesDecision) => void;
+}) {
+	if (!confirmation) return null;
+	const answer = (imagePages: ImagePagesDecision) => onConfirm(confirmation.index, imagePages);
+	const title = `Transcribe ${confirmation.imagePages} image ${confirmation.imagePages === 1 ? "page" : "pages"}?`;
+	return <TranscribePagesBody key={confirmation.index} confirmation={confirmation} onAnswer={answer}
+		renderFrame={(frame) => <HostDialog open frame={frame} aria-label={title}
+			onClose={() => { answer("skip"); return "closed"; }}
+			backdropProps={{ className: "fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm", "data-testid": "transcribe-pages-dialog" }}>
+			{frame.props.children}
+		</HostDialog>} />;
 }

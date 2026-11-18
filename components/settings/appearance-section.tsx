@@ -493,6 +493,16 @@ export function GraphSection({
 					onChange={(on) => onSectionChange({ ...graph, rendering: on })}
 				/>
 			</SettingsRow>
+			{/* Notes import: image-only PDF pages (handwritten or scanned) go to
+			    the Vision model instead of being skipped. Above a few pages per
+			    PDF the import asks first (lib/notes-import-limits.ts). */}
+			<SettingsRow label="Transcribe image-only PDF pages" hint="Handwritten or scanned pages · Vision model" testid="graph-row-transcribe">
+				<Toggle
+					checked={graph?.transcribeImagePages ?? true}
+					label="transcribe image-only PDF pages"
+					onChange={(on) => onSectionChange({ ...graph, transcribeImagePages: on })}
+				/>
+			</SettingsRow>
 			<SettingsRow
 				label="Extraction chunk budget"
 				hint={`${resolved.extractionChunkTokens} tok`}

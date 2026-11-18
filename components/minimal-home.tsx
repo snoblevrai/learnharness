@@ -22,7 +22,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ListTreeIcon } from "lucide-react";
 import { ChainTableOverlay } from "@/components/chain-table.tsx";
 import { GraphCostControl } from "@/components/graph-view.tsx";
-import { NotesImportControl, NotesImportErrors, NotesImportNotices, useNotesImport } from "@/components/notes-import.tsx";
+import { NotesImportControl, NotesImportErrors, NotesImportNotices, TranscribePagesDialog, useNotesImport } from "@/components/notes-import.tsx";
 import { Hint } from "@/components/ui/hint";
 import type { ChatSummary, GraphCostSummary, GraphSnapshot } from "@/src/core";
 
@@ -173,6 +173,7 @@ export function MinimalHome({
 				</div>
 				<NotesImportErrors errors={notesImport.errors} />
 				<NotesImportNotices notices={notesImport.notices} />
+				<TranscribePagesDialog confirmation={notesImport.confirmation} onConfirm={notesImport.onConfirm} />
 				{costs && costs.runs.length > 0 && <GraphCostControl costs={costs} />}
 			</div>
 
